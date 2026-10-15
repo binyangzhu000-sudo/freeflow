@@ -46,7 +46,56 @@ public enum ProviderPreset {
         return url.host?.lowercased() == atlasCloudHost
     }
 
+    /// Why the preset cannot be applied to the current settings.
+    public enum Blocker: Equatable {
+        /// Transcription would end up sending a key that is not its own: with
+        /// no transcription key set, the transcription key falls back to the
+        /// LLM key, so once the Atlas Cloud key is entered it would be sent to
+        /// the transcription host.
+        case transcriptionKeyRequired
+        /// Transcription would resolve to Atlas Cloud, which has no
+        /// transcription endpoint.
+        case separateTranscriptionRequired
+
+        public var message: String {
+            switch self {
+            case .transcriptionKeyRequired:
+                return "Enter a Transcription API Key first. Without one, your Atlas Cloud key would be sent to the transcription provider."
+            case .separateTranscriptionRequired:
+                return "Atlas Cloud has no transcription endpoint. Set a separate Transcription API URL and Transcription API Key first."
+            }
+        }
+    }
+
+    /// Returns why the preset cannot be applied yet, or nil when it can.
+    ///
+    /// The transcription URL/key pair must be explicit and must not be Atlas
+    /// Cloud, because an empty transcription override resolves to the LLM URL
+    /// or key, and those are exactly what the preset changes.
+    public static func blocker(for current: ProviderSettingsSnapshot) -> Blocker? {
+        let urlOverride = current.transcriptionAPIURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        let keyOverride = current.transcriptionAPIKey.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        if isAtlasCloud(baseURL: current.apiBaseURL) {
+            // Already on Atlas Cloud: nothing is being pinned, so both halves
+            // must already be set by the user and point somewhere else.
+            if urlOverride.isEmpty || isAtlasCloud(baseURL: urlOverride) {
+                return .separateTranscriptionRequired
+            }
+            return keyOverride.isEmpty ? .transcriptionKeyRequired : nil
+        }
+
+        if isAtlasCloud(baseURL: current.effectiveTranscriptionBaseURL) {
+            return .separateTranscriptionRequired
+        }
+        // The key we would pin must be a real one; an empty value cannot be
+        // pinned because empty means "inherit the LLM key".
+        return current.effectiveTranscriptionAPIKey.isEmpty ? .transcriptionKeyRequired : nil
+    }
+
     /// Settings after choosing the Atlas Cloud preset.
+    ///
+    /// Returns `current` unchanged when `blocker(for:)` is non-nil.
     ///
     /// When the LLM endpoint changes, the key saved for the previous provider
     /// is cleared so it can never be sent to Atlas Cloud; the user has to enter
@@ -55,6 +104,7 @@ public enum ProviderPreset {
     /// override that is already set is left as it is, so the transcription
     /// URL/key pair is exactly the one in use before the preset.
     public static func applyingAtlasCloud(to current: ProviderSettingsSnapshot) -> ProviderSettingsSnapshot {
+        guard blocker(for: current) == nil else { return current }
         var result = current
         guard !isAtlasCloud(baseURL: current.apiBaseURL) else {
             return result
@@ -70,5 +120,41 @@ public enum ProviderPreset {
         result.apiBaseURL = atlasCloudAPIBaseURL
         result.apiKey = ""
         return result
+    }
+}
+
+/// Lets an in-flight API key validation be discarded when the provider changes
+/// underneath it. A validation captures a token before it starts; changing the
+/// provider (for example choosing a preset) invalidates every earlier token,
+/// and a result is only applied while its token is still current.
+public final class KeyValidationGate: @unchecked Sendable {
+    private let lock = NSLock()
+    private var generation = 0
+
+    public init() {}
+
+    public func begin() -> Int {
+        lock.lock()
+        defer { lock.unlock() }
+        generation += 1
+        return generation
+    }
+
+    public func invalidate() {
+        lock.lock()
+        defer { lock.unlock() }
+        generation += 1
+    }
+
+    /// Runs `apply` and returns true only if no provider change happened since
+    /// `token` was issued. Must be called where `apply` is allowed to run.
+    @discardableResult
+    public func applyIfCurrent(_ token: Int, _ apply: () -> Void) -> Bool {
+        lock.lock()
+        let isCurrent = token == generation
+        lock.unlock()
+        guard isCurrent else { return false }
+        apply()
+        return true
     }
 }

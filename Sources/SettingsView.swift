@@ -43,6 +43,7 @@ struct ProviderSettingsFields: View {
     @Binding var apiBaseURLInput: String
     @Binding var transcriptionAPIURLInput: String
     @Binding var transcriptionAPIKeyInput: String
+    @State private var atlasPresetBlockedMessage: String?
     @FocusState private var isEditingAPIBaseURL: Bool
     @FocusState private var isEditingTranscriptionModel: Bool
     @FocusState private var isEditingRealtimeStreamingModel: Bool
@@ -154,14 +155,22 @@ struct ProviderSettingsFields: View {
     /// provider is cleared (see `ProviderPreset.applyingAtlasCloud`), and the
     /// transcription URL/key keep resolving to the provider they used before.
     private func applyAtlasCloudPreset() {
-        let next = ProviderPreset.applyingAtlasCloud(
-            to: ProviderSettingsSnapshot(
-                apiBaseURL: appState.apiBaseURL,
-                apiKey: appState.apiKey,
-                transcriptionAPIURL: appState.transcriptionAPIURL,
-                transcriptionAPIKey: appState.transcriptionAPIKey
-            )
+        let current = ProviderSettingsSnapshot(
+            apiBaseURL: appState.apiBaseURL,
+            apiKey: appState.apiKey,
+            transcriptionAPIURL: appState.transcriptionAPIURL,
+            transcriptionAPIKey: appState.transcriptionAPIKey
         )
+        if let blocker = ProviderPreset.blocker(for: current) {
+            atlasPresetBlockedMessage = blocker.message
+            return
+        }
+        atlasPresetBlockedMessage = nil
+        let next = ProviderPreset.applyingAtlasCloud(to: current)
+
+        // A key validation that is still running was started for the previous
+        // provider; its result must not be saved under the new endpoint.
+        appState.keyValidationGate.invalidate()
 
         // Pin transcription before the LLM endpoint and key change.
         transcriptionAPIURLInput = next.transcriptionAPIURL
@@ -220,6 +229,12 @@ struct ProviderSettingsFields: View {
                 Text("Sends cleanup and screenshot-context requests to api.atlascloud.ai with \(ProviderPreset.atlasCloudModel). Your current API key is cleared, so enter an Atlas Cloud key above. Transcription keeps using your previous provider, since Atlas Cloud has no transcription endpoint.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+            }
+
+            if let message = atlasPresetBlockedMessage {
+                Text(message)
+                    .font(.caption)
+                    .foregroundStyle(.red)
             }
 
             if showsModelDescription {
@@ -1084,6 +1099,7 @@ struct GeneralSettingsView: View {
         keyValidationError = nil
         keyValidationSuccess = false
 
+        let token = appState.keyValidationGate.begin()
         Task {
             let valid = await TranscriptionService.validateAPIKey(
                 key,
@@ -1091,10 +1107,15 @@ struct GeneralSettingsView: View {
             )
             await MainActor.run {
                 isValidatingKey = false
-                if valid {
-                    appState.apiKey = key
-                    keyValidationSuccess = true
-                } else {
+                // The provider changed while this was running (for example the
+                // Atlas Cloud preset): the key belongs to the old provider.
+                guard appState.keyValidationGate.applyIfCurrent(token, {
+                    if valid {
+                        appState.apiKey = key
+                        keyValidationSuccess = true
+                    }
+                }) else { return }
+                if !valid {
                     keyValidationError = "Validation failed. Please check your API key and provider settings, then try again."
                 }
             }

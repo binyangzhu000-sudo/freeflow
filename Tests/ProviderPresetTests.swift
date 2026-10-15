@@ -9,6 +9,10 @@ enum ProviderPresetTests {
         testExistingTranscriptionOverridesArePreserved()
         testPartialTranscriptionOverridesKeepTheirPair()
         testRepeatingThePresetDoesNotClearTheAtlasCloudKey()
+        testEmptyKeysAreBlockedUntilTranscriptionKeyIsSet()
+        testFullTransitionAfterEnteringTheAtlasKey()
+        testExistingAtlasURLNeedsSeparateTranscription()
+        testStaleKeyValidationIsDiscarded()
     }
 
     private static let groqURL = "https://api.groq.com/openai/v1"
@@ -106,5 +110,137 @@ enum ProviderPresetTests {
 
         let once = ProviderPreset.applyingAtlasCloud(to: snapshot())
         TestSupport.expectEqual(ProviderPreset.applyingAtlasCloud(to: once), once)
+    }
+
+    /// Every (URL, key) pair the app would use must keep keys with the host
+    /// they were entered for.
+    private static func expectNoKeyCrossesHosts(
+        _ settings: ProviderSettingsSnapshot,
+        atlasKey: String,
+        otherKeys: [String],
+        _ message: String
+    ) {
+        let pairs = [
+            (url: settings.apiBaseURL, key: settings.apiKey),
+            (url: settings.effectiveTranscriptionBaseURL, key: settings.effectiveTranscriptionAPIKey),
+        ]
+        for pair in pairs {
+            if ProviderPreset.isAtlasCloud(baseURL: pair.url) {
+                TestSupport.expect(!otherKeys.contains(pair.key), "\(message): another provider's key reaches Atlas Cloud")
+            } else if !atlasKey.isEmpty {
+                TestSupport.expect(pair.key != atlasKey, "\(message): the Atlas Cloud key reaches \(pair.url)")
+            }
+        }
+    }
+
+    /// With empty LLM and transcription keys, the old transcription URL would
+    /// be pinned but its key would stay inherited, so the Atlas key entered
+    /// later would be sent to the old transcription host. Apply is refused.
+    private static func testEmptyKeysAreBlockedUntilTranscriptionKeyIsSet() {
+        let empty = snapshot(key: "")
+        TestSupport.expectEqual(ProviderPreset.blocker(for: empty), .transcriptionKeyRequired)
+        TestSupport.expectEqual(ProviderPreset.applyingAtlasCloud(to: empty), empty)
+
+        // URL override set, both keys empty: same hole.
+        let urlOnly = snapshot(key: "", transcriptionURL: "https://asr.example.test/v1")
+        TestSupport.expectEqual(ProviderPreset.blocker(for: urlOnly), .transcriptionKeyRequired)
+
+        // With a transcription key set the preset is allowed.
+        let withKey = snapshot(key: "", transcriptionKey: "synthetic-asr-key")
+        TestSupport.expectEqual(ProviderPreset.blocker(for: withKey), nil)
+    }
+
+    /// Preset, then the user enters an Atlas key: transcription must still
+    /// resolve to exactly the pair it used before, and no key crosses hosts.
+    private static func testFullTransitionAfterEnteringTheAtlasKey() {
+        let starts = [
+            snapshot(),
+            snapshot(key: "", transcriptionKey: "synthetic-asr-key"),
+            snapshot(transcriptionURL: "https://asr.example.test/v1", transcriptionKey: "synthetic-asr-key"),
+            snapshot(transcriptionURL: "https://asr.example.test/v1"),
+            snapshot(transcriptionKey: "synthetic-asr-key"),
+        ]
+        for before in starts {
+            let applied = ProviderPreset.applyingAtlasCloud(to: before)
+            TestSupport.expectEqual(applied.apiBaseURL, ProviderPreset.atlasCloudAPIBaseURL)
+            var entered = applied
+            entered.apiKey = "synthetic-atlas-key"
+
+            TestSupport.expectEqual(entered.effectiveTranscriptionBaseURL, before.effectiveTranscriptionBaseURL)
+            TestSupport.expectEqual(entered.effectiveTranscriptionAPIKey, before.effectiveTranscriptionAPIKey)
+            expectNoKeyCrossesHosts(
+                entered,
+                atlasKey: "synthetic-atlas-key",
+                otherKeys: ["synthetic-groq-key"],
+                "after entering the Atlas key"
+            )
+        }
+    }
+
+    /// An Atlas URL entered by hand with empty transcription overrides leaves
+    /// transcription pointed at Atlas, which has no transcription endpoint.
+    private static func testExistingAtlasURLNeedsSeparateTranscription() {
+        let onAtlas = snapshot(baseURL: ProviderPreset.atlasCloudAPIBaseURL, key: "synthetic-atlas-key")
+        TestSupport.expectEqual(ProviderPreset.blocker(for: onAtlas), .separateTranscriptionRequired)
+
+        let toAtlas = snapshot(
+            baseURL: ProviderPreset.atlasCloudAPIBaseURL,
+            key: "synthetic-atlas-key",
+            transcriptionURL: ProviderPreset.atlasCloudAPIBaseURL,
+            transcriptionKey: "synthetic-asr-key"
+        )
+        TestSupport.expectEqual(ProviderPreset.blocker(for: toAtlas), .separateTranscriptionRequired)
+
+        // URL set but key inherited: the Atlas key would go to the ASR host.
+        let urlOnly = snapshot(
+            baseURL: ProviderPreset.atlasCloudAPIBaseURL,
+            key: "synthetic-atlas-key",
+            transcriptionURL: "https://asr.example.test/v1"
+        )
+        TestSupport.expectEqual(ProviderPreset.blocker(for: urlOnly), .transcriptionKeyRequired)
+
+        let configured = snapshot(
+            baseURL: ProviderPreset.atlasCloudAPIBaseURL,
+            key: "synthetic-atlas-key",
+            transcriptionURL: "https://asr.example.test/v1",
+            transcriptionKey: "synthetic-asr-key"
+        )
+        TestSupport.expectEqual(ProviderPreset.blocker(for: configured), nil)
+        TestSupport.expectEqual(ProviderPreset.applyingAtlasCloud(to: configured), configured)
+    }
+
+    /// A validation started for the old provider finishes after the preset was
+    /// chosen (deferred response): its key must not be saved.
+    private static func testStaleKeyValidationIsDiscarded() {
+        let gate = KeyValidationGate()
+        var savedKey = ""
+
+        // Normal case: nothing changes while validating.
+        let first = gate.begin()
+        TestSupport.expect(gate.applyIfCurrent(first) { savedKey = "synthetic-groq-key" }, "A current validation is applied")
+        TestSupport.expectEqual(savedKey, "synthetic-groq-key")
+
+        // Deferred case: the response is held back until the preset is applied.
+        savedKey = ""
+        let second = gate.begin()
+        let deferredResponse = DispatchSemaphore(value: 0)
+        var applied = true
+        let finished = DispatchSemaphore(value: 0)
+        DispatchQueue.global().async {
+            deferredResponse.wait()
+            applied = gate.applyIfCurrent(second) { savedKey = "synthetic-groq-key" }
+            finished.signal()
+        }
+        gate.invalidate() // the preset is chosen while the request is in flight
+        deferredResponse.signal()
+        finished.wait()
+        TestSupport.expect(!applied, "A validation that finishes after the provider changed is rejected")
+        TestSupport.expectEqual(savedKey, "")
+
+        // A validation started after the change is current again.
+        let third = gate.begin()
+        TestSupport.expect(gate.applyIfCurrent(third) { savedKey = "synthetic-atlas-key" }, "A new validation is applied")
+        TestSupport.expect(!gate.applyIfCurrent(second) { savedKey = "stale" }, "Older tokens stay invalid")
+        TestSupport.expectEqual(savedKey, "synthetic-atlas-key")
     }
 }

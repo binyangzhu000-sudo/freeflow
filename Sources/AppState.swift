@@ -290,6 +290,9 @@ final class AppState: ObservableObject, @unchecked Sendable {
         }
     }
 
+    /// Discards in-flight key validations when the provider changes underneath them.
+    let keyValidationGate = KeyValidationGate()
+
     @Published var apiKey: String {
         didSet {
             persistAPIKey(apiKey)

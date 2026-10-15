@@ -1144,16 +1144,22 @@ struct SetupView: View {
         isValidatingKey = true
         keyValidationError = nil
 
+        let token = appState.keyValidationGate.begin()
         Task {
             let valid = await TranscriptionService.validateAPIKey(key, baseURL: resolvedBaseURL)
             await MainActor.run {
                 isValidatingKey = false
-                if valid {
-                    appState.apiKey = key
-                    withAnimation {
-                        currentStep = nextStep(currentStep)
+                // The provider changed while this was running (for example the
+                // Atlas Cloud preset): the key belongs to the old provider.
+                guard appState.keyValidationGate.applyIfCurrent(token, {
+                    if valid {
+                        appState.apiKey = key
+                        withAnimation {
+                            currentStep = nextStep(currentStep)
+                        }
                     }
-                } else {
+                }) else { return }
+                if !valid {
                     keyValidationError = "Validation failed. Please check your API key and provider settings, then try again."
                 }
             }
