@@ -20,6 +20,18 @@ public struct ProviderSettingsSnapshot: Equatable {
         self.transcriptionAPIKey = transcriptionAPIKey
     }
 
+    /// Forms may contain raw whitespace or a blank URL that means the default.
+    /// Normalize before pinning inherited values into explicit overrides.
+    public var normalizedDraft: ProviderSettingsSnapshot {
+        let url = apiBaseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        return ProviderSettingsSnapshot(
+            apiBaseURL: url.isEmpty ? APIConfigurationSaveFlow.defaultBaseURL : url,
+            apiKey: apiKey.trimmingCharacters(in: .whitespacesAndNewlines),
+            transcriptionAPIURL: transcriptionAPIURL.trimmingCharacters(in: .whitespacesAndNewlines),
+            transcriptionAPIKey: transcriptionAPIKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        )
+    }
+
     public var effectiveTranscriptionBaseURL: String {
         let trimmed = transcriptionAPIURL.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? apiBaseURL : trimmed

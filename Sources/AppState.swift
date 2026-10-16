@@ -295,6 +295,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
 
     @Published var apiKey: String {
         didSet {
+            guard !isApplyingAPIConfiguration else { return }
             persistAPIKey(apiKey)
             rebuildContextService()
         }
@@ -302,6 +303,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
 
     @Published var apiBaseURL: String {
         didSet {
+            guard !isApplyingAPIConfiguration else { return }
             persistAPIBaseURL(apiBaseURL)
             rebuildContextService()
         }
@@ -309,15 +311,20 @@ final class AppState: ObservableObject, @unchecked Sendable {
 
     @Published var transcriptionAPIURL: String {
         didSet {
+            guard !isApplyingAPIConfiguration else { return }
             persistOptionalAPIValue(transcriptionAPIURL, account: transcriptionAPIURLStorageKey)
         }
     }
 
     @Published var transcriptionAPIKey: String {
         didSet {
+            guard !isApplyingAPIConfiguration else { return }
             persistOptionalAPIValue(transcriptionAPIKey, account: transcriptionAPIKeyStorageKey)
         }
     }
+
+    // Publish only after the complete configuration transaction has persisted.
+    @Published private(set) var committedAPIConfiguration: ValidatedAPIConfiguration
 
     @Published var transcriptionModel: String {
         didSet {
@@ -634,6 +641,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
     private var pendingMicrophonePermissionTriggerMode: RecordingTriggerMode?
     private var pendingMicrophonePermissionSelectionSnapshot: AppSelectionSnapshot?
     private var pendingMicrophonePermissionManualCommandRequested: Bool?
+    private var isApplyingAPIConfiguration = false
     private let postTranscriptionUpdateReminderDuration: TimeInterval = 7
 
     init() {
@@ -753,6 +761,12 @@ final class AppState: ObservableObject, @unchecked Sendable {
         self.apiBaseURL = apiBaseURL
         self.transcriptionAPIURL = transcriptionAPIURL
         self.transcriptionAPIKey = transcriptionAPIKey
+        self.committedAPIConfiguration = ValidatedAPIConfiguration(
+            apiKey: apiKey,
+            baseURL: apiBaseURL,
+            transcriptionAPIURL: transcriptionAPIURL,
+            transcriptionAPIKey: transcriptionAPIKey
+        )
         self.transcriptionModel = transcriptionModel
         self.postProcessingModel = postProcessingModel
         self.postProcessingFallbackModel = postProcessingFallbackModel
@@ -860,7 +874,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
         }
     }
 
-    static let defaultAPIBaseURL = "https://api.groq.com/openai/v1"
+    static let defaultAPIBaseURL = APIConfigurationSaveFlow.defaultBaseURL
 
     private struct StoredShortcutConfiguration {
         let hold: ShortcutBinding
@@ -1002,6 +1016,31 @@ final class AppState: ObservableObject, @unchecked Sendable {
             contextModel: contextModel,
             contextScreenshotMaxDimension: contextScreenshotMaxDimension,
             desktopScreenshotFallbackEnabled: desktopScreenshotFallbackEnabled
+        )
+    }
+
+    func updateAPIConfiguration(
+        apiKey: String,
+        baseURL: String,
+        transcriptionAPIURL: String,
+        transcriptionAPIKey: String
+    ) {
+        isApplyingAPIConfiguration = true
+        self.apiKey = apiKey
+        self.apiBaseURL = baseURL
+        self.transcriptionAPIURL = transcriptionAPIURL
+        self.transcriptionAPIKey = transcriptionAPIKey
+        isApplyingAPIConfiguration = false
+        persistAPIKey(apiKey)
+        persistAPIBaseURL(baseURL)
+        persistOptionalAPIValue(transcriptionAPIURL, account: transcriptionAPIURLStorageKey)
+        persistOptionalAPIValue(transcriptionAPIKey, account: transcriptionAPIKeyStorageKey)
+        rebuildContextService()
+        committedAPIConfiguration = ValidatedAPIConfiguration(
+            apiKey: apiKey,
+            baseURL: baseURL,
+            transcriptionAPIURL: transcriptionAPIURL,
+            transcriptionAPIKey: transcriptionAPIKey
         )
     }
 

@@ -14,7 +14,19 @@ enum ProviderPresetTests {
         testExistingAtlasURLNeedsSeparateTranscription()
         testStaleKeyValidationIsDiscarded()
         testPresetClearsUnsavedKeyWithEmptySavedKey()
+        testRawDraftNormalizationBeforePreset()
         testEndpointEditsAndResetDiscardValidation()
+    }
+
+    private static func testRawDraftNormalizationBeforePreset() {
+        let blankURL = snapshot(baseURL: " ", key: " synthetic-old-key ").normalizedDraft
+        let applied = ProviderPreset.applyingAtlasCloud(to: blankURL, apiKeyDraft: " synthetic-old-key ")
+        TestSupport.expectEqual(applied.settings.transcriptionAPIURL, APIConfigurationSaveFlow.defaultBaseURL)
+        TestSupport.expectEqual(applied.settings.transcriptionAPIKey, "synthetic-old-key")
+        let whitespaceKeys = snapshot(key: " ", transcriptionKey: " ").normalizedDraft
+        TestSupport.expectEqual(ProviderPreset.blocker(for: whitespaceKeys), .transcriptionKeyRequired)
+        let blocked = ProviderPreset.applyingAtlasCloud(to: whitespaceKeys)
+        TestSupport.expect(!ProviderPreset.isAtlasCloud(baseURL: blocked.apiBaseURL), "Whitespace cannot be pinned as an explicit transcription key")
     }
 
     private static func testPresetClearsUnsavedKeyWithEmptySavedKey() {

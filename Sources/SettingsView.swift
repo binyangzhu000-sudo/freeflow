@@ -67,10 +67,12 @@ struct ProviderSettingsFields: View {
 
     private func commitAPIBaseURL() {
         let trimmed = apiBaseURLInput.trimmingCharacters(in: .whitespacesAndNewlines)
-        let resolvedBaseURL = trimmed.isEmpty ? AppState.defaultAPIBaseURL : trimmed
-        apiBaseURLInput = resolvedBaseURL
-        appState.keyValidationGate.invalidateIfEndpointChanged(from: appState.apiBaseURL, to: resolvedBaseURL)
-        appState.apiBaseURL = resolvedBaseURL
+        setDraftAPIBaseURL(trimmed.isEmpty ? AppState.defaultAPIBaseURL : trimmed)
+    }
+
+    private func setDraftAPIBaseURL(_ next: String) {
+        appState.keyValidationGate.invalidateIfEndpointChanged(from: apiBaseURLInput, to: next)
+        apiBaseURLInput = next
     }
 
     private func commitTranscriptionModel() {
@@ -140,29 +142,22 @@ struct ProviderSettingsFields: View {
     }
 
     private func commitTranscriptionAPIURL() {
-        let trimmed = transcriptionAPIURLInput.trimmingCharacters(in: .whitespacesAndNewlines)
-        transcriptionAPIURLInput = trimmed
-        guard appState.transcriptionAPIURL != trimmed else { return }
-        appState.transcriptionAPIURL = trimmed
+        transcriptionAPIURLInput = transcriptionAPIURLInput.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     private func commitTranscriptionAPIKey() {
-        let trimmed = transcriptionAPIKeyInput.trimmingCharacters(in: .whitespacesAndNewlines)
-        transcriptionAPIKeyInput = trimmed
-        guard appState.transcriptionAPIKey != trimmed else { return }
-        appState.transcriptionAPIKey = trimmed
+        transcriptionAPIKeyInput = transcriptionAPIKeyInput.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    /// Points the LLM requests at Atlas Cloud. The saved key of the previous
-    /// provider is cleared (see `ProviderPreset.applyingAtlasCloud`), and the
-    /// transcription URL/key keep resolving to the provider they used before.
+    /// Prepares an Atlas configuration for Save/Continue without changing the
+    /// active API settings. The transcription draft keeps its effective pair.
     private func applyAtlasCloudPreset() {
         let current = ProviderSettingsSnapshot(
-            apiBaseURL: appState.apiBaseURL,
-            apiKey: appState.apiKey,
-            transcriptionAPIURL: appState.transcriptionAPIURL,
-            transcriptionAPIKey: appState.transcriptionAPIKey
-        )
+            apiBaseURL: apiBaseURLInput,
+            apiKey: apiKeyInput,
+            transcriptionAPIURL: transcriptionAPIURLInput,
+            transcriptionAPIKey: transcriptionAPIKeyInput
+        ).normalizedDraft
         if let blocker = ProviderPreset.blocker(for: current) {
             atlasPresetBlockedMessage = blocker.message
             return
@@ -180,13 +175,9 @@ struct ProviderSettingsFields: View {
 
         // Pin transcription before the LLM endpoint and key change.
         transcriptionAPIURLInput = next.transcriptionAPIURL
-        appState.transcriptionAPIURL = next.transcriptionAPIURL
         transcriptionAPIKeyInput = next.transcriptionAPIKey
-        appState.transcriptionAPIKey = next.transcriptionAPIKey
 
         apiBaseURLInput = next.apiBaseURL
-        appState.apiBaseURL = next.apiBaseURL
-        appState.apiKey = next.apiKey
 
         postProcessingModelDraft = ProviderPreset.atlasCloudModel
         appState.postProcessingModel = ProviderPreset.atlasCloudModel
@@ -220,8 +211,7 @@ struct ProviderSettingsFields: View {
                     }
 
                 Button("Reset to Default") {
-                    apiBaseURLInput = AppState.defaultAPIBaseURL
-                    commitAPIBaseURL()
+                    setDraftAPIBaseURL(AppState.defaultAPIBaseURL)
                 }
                 .font(.caption)
             }
@@ -232,7 +222,7 @@ struct ProviderSettingsFields: View {
                 }
                 .font(.caption)
 
-                Text("Sends cleanup and screenshot-context requests to api.atlascloud.ai with \(ProviderPreset.atlasCloudModel). Your current API key is cleared, so enter an Atlas Cloud key above. Transcription keeps using your previous provider, since Atlas Cloud has no transcription endpoint.")
+                Text("Sends cleanup and screenshot-context requests to api.atlascloud.ai with \(ProviderPreset.atlasCloudModel). Your key draft is cleared; enter an Atlas Cloud key above and save to apply the API settings. Transcription keeps using your previous provider, since Atlas Cloud has no transcription endpoint.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -359,7 +349,6 @@ struct ProviderSettingsFields: View {
                     if !transcriptionAPIURLInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                         Button("Clear") {
                             transcriptionAPIURLInput = ""
-                            appState.transcriptionAPIURL = ""
                         }
                         .font(.caption)
                     }
@@ -385,7 +374,6 @@ struct ProviderSettingsFields: View {
                     if !transcriptionAPIKeyInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                         Button("Clear") {
                             transcriptionAPIKeyInput = ""
-                            appState.transcriptionAPIKey = ""
                         }
                         .font(.caption)
                     }
@@ -599,14 +587,11 @@ struct GeneralSettingsView: View {
     @AppStorage("use_compact_overlay") private var useCompactOverlay = true
     @AppStorage(RecordingTimerPreference.storageKey) private var showRecordingTimer = RecordingTimerPreference.defaultEnabled
     @State private var screensVersion = 0
-    @State private var apiKeyInput: String = ""
-    @State private var apiBaseURLInput: String = ""
-    @State private var transcriptionAPIURLInput: String = ""
-    @State private var transcriptionAPIKeyInput: String = ""
+    @State private var apiDraft = APIConfigurationDraft()
     @State private var advancedProviderSettingsExpanded = false
     @State private var isValidatingKey = false
     @State private var keyValidationError: String?
-    @State private var keyValidationSuccess = false
+    @State private var successfulAPIConfiguration: ValidatedAPIConfiguration?
     @State private var customVocabularyInput: String = ""
     @FocusState private var customVocabularyFocused: Bool
     @State private var micPermissionGranted = false
@@ -820,30 +805,31 @@ struct GeneralSettingsView: View {
             }
             .padding(24)
         }
-        .onChange(of: appState.apiKey) { newKey in
-            apiKeyInput = newKey
-        }
         .onAppear {
-            apiKeyInput = appState.apiKey
-            apiBaseURLInput = appState.apiBaseURL
-            transcriptionAPIURLInput = appState.transcriptionAPIURL
-            transcriptionAPIKeyInput = appState.transcriptionAPIKey
+            apiDraft.present(appState.committedAPIConfiguration)
+            isValidatingKey = false
+            keyValidationError = nil
+            successfulAPIConfiguration = nil
             customVocabularyInput = appState.customVocabulary
             checkMicPermission()
             appState.refreshLaunchAtLoginStatus()
             Task { await githubCache.fetchIfNeeded() }
         }
         .onDisappear {
+            apiDraft.dismiss()
             commitCustomVocabulary()
         }
-        .onChange(of: appState.transcriptionAPIURL) { value in
-            if transcriptionAPIURLInput != value {
-                transcriptionAPIURLInput = value
+        .onChange(of: appState.committedAPIConfiguration) { saved in
+            apiDraft.reconcile(saved)
+            keyValidationError = nil
+            if successfulAPIConfiguration != saved {
+                successfulAPIConfiguration = nil
             }
         }
-        .onChange(of: appState.transcriptionAPIKey) { value in
-            if transcriptionAPIKeyInput != value {
-                transcriptionAPIKeyInput = value
+        .onChange(of: apiDraft.configuration) { value in
+            keyValidationError = nil
+            if successfulAPIConfiguration != value {
+                successfulAPIConfiguration = nil
             }
         }
     }
@@ -1049,26 +1035,22 @@ struct GeneralSettingsView: View {
                 .foregroundStyle(.secondary)
 
             HStack(spacing: 8) {
-                SecureField("Enter your API key", text: $apiKeyInput)
+                SecureField("Enter your API key", text: $apiDraft.apiKey)
                     .textFieldStyle(.roundedBorder)
                     .font(.system(.body, design: .monospaced))
                     .disabled(isValidatingKey)
-                    .onChange(of: apiKeyInput) { _ in
-                        keyValidationError = nil
-                        keyValidationSuccess = false
-                    }
 
                 Button(isValidatingKey ? "Validating..." : "Save") {
                     validateAndSaveKey()
                 }
-                .disabled(apiKeyInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || isValidatingKey)
+                .disabled(apiDraft.apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || isValidatingKey)
             }
 
             if let error = keyValidationError {
                 Label(error, systemImage: "xmark.circle.fill")
                     .foregroundStyle(.red)
                     .font(.caption)
-            } else if keyValidationSuccess {
+            } else if apiDraft.showsSavedSuccess(successfulAPIConfiguration, committed: appState.committedAPIConfiguration) {
                 Label("API key saved", systemImage: "checkmark.circle.fill")
                     .foregroundStyle(.green)
                     .font(.caption)
@@ -1078,10 +1060,10 @@ struct GeneralSettingsView: View {
                 VStack(alignment: .leading, spacing: 12) {
                     Divider()
                     ProviderSettingsFields(
-                        apiBaseURLInput: $apiBaseURLInput,
-                        apiKeyInput: $apiKeyInput,
-                        transcriptionAPIURLInput: $transcriptionAPIURLInput,
-                        transcriptionAPIKeyInput: $transcriptionAPIKeyInput,
+                        apiBaseURLInput: $apiDraft.baseURL,
+                        apiKeyInput: $apiDraft.apiKey,
+                        transcriptionAPIURLInput: $apiDraft.transcriptionAPIURL,
+                        transcriptionAPIKeyInput: $apiDraft.transcriptionAPIKey,
                         showsModelDescription: false
                     )
                 }
@@ -1100,31 +1082,42 @@ struct GeneralSettingsView: View {
     }
 
     private func validateAndSaveKey() {
-        let key = apiKeyInput.trimmingCharacters(in: .whitespacesAndNewlines)
-        let baseURL = apiBaseURLInput.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !isValidatingKey else { return }
+        let submission = apiDraft.submission
         isValidatingKey = true
         keyValidationError = nil
-        keyValidationSuccess = false
+        successfulAPIConfiguration = nil
 
         let token = appState.keyValidationGate.begin()
-        Task {
-            let valid = await TranscriptionService.validateAPIKey(
-                key,
-                baseURL: baseURL.isEmpty ? AppState.defaultAPIBaseURL : baseURL
-            )
-            await MainActor.run {
-                isValidatingKey = false
-                // The provider changed while this was running (for example the
-                // Atlas Cloud preset): the key belongs to the old provider.
-                guard appState.keyValidationGate.applyIfCurrent(token, {
-                    if valid {
-                        appState.apiKey = key
-                        keyValidationSuccess = true
+        Task { @MainActor in
+            var accepted: ValidatedAPIConfiguration?
+            let valid = await APIConfigurationSaveFlow.validateAndApply(
+                apiKey: submission.configuration.apiKey,
+                baseURL: submission.configuration.baseURL,
+                transcriptionAPIURL: submission.configuration.transcriptionAPIURL,
+                transcriptionAPIKey: submission.configuration.transcriptionAPIKey
+            ) { configuration in
+                // Never commit credentials validated for a different draft endpoint.
+                guard apiDraft.configuration.baseURL == submission.configuration.baseURL else { return }
+                appState.keyValidationGate.applyIfCurrent(token) {
+                    if apiDraft.accept(configuration, for: submission) {
+                        accepted = configuration
                     }
-                }) else { return }
-                if !valid {
-                    keyValidationError = "Validation failed. Please check your API key and provider settings, then try again."
+                    appState.updateAPIConfiguration(
+                        apiKey: configuration.apiKey,
+                        baseURL: configuration.baseURL,
+                        transcriptionAPIURL: configuration.transcriptionAPIURL,
+                        transcriptionAPIKey: configuration.transcriptionAPIKey
+                    )
                 }
+            }
+            guard apiDraft.isCurrent(submission) else { return }
+            isValidatingKey = false
+            if valid, let accepted, apiDraft.configuration == accepted,
+               appState.committedAPIConfiguration == accepted {
+                successfulAPIConfiguration = accepted
+            } else if !valid && apiDraft.matches(submission) {
+                keyValidationError = "Validation failed. Please check your API key and provider settings, then try again."
             }
         }
     }
