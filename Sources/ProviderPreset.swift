@@ -93,6 +93,18 @@ public enum ProviderPreset {
         return current.effectiveTranscriptionAPIKey.isEmpty ? .transcriptionKeyRequired : nil
     }
 
+    /// Applies the preset to saved settings and the unsaved key field together.
+    /// A blocked or already-selected preset preserves the user's draft; crossing
+    /// to Atlas clears it even when the saved key was empty before the change.
+    public static func applyingAtlasCloud(
+        to current: ProviderSettingsSnapshot,
+        apiKeyDraft: String
+    ) -> (settings: ProviderSettingsSnapshot, apiKeyDraft: String) {
+        let next = applyingAtlasCloud(to: current)
+        let changedEndpoint = next.apiBaseURL != current.apiBaseURL
+        return (next, changedEndpoint ? "" : apiKeyDraft)
+    }
+
     /// Settings after choosing the Atlas Cloud preset.
     ///
     /// Returns `current` unchanged when `blocker(for:)` is non-nil.
@@ -144,6 +156,12 @@ public final class KeyValidationGate: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         generation += 1
+    }
+
+    /// A field commit that only loses focus must not cancel a current validation.
+    /// An actual endpoint edit or reset must discard the previous result.
+    public func invalidateIfEndpointChanged(from previous: String, to next: String) {
+        if previous != next { invalidate() }
     }
 
     /// Runs `apply` and returns true only if no provider change happened since

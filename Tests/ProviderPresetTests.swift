@@ -13,6 +13,37 @@ enum ProviderPresetTests {
         testFullTransitionAfterEnteringTheAtlasKey()
         testExistingAtlasURLNeedsSeparateTranscription()
         testStaleKeyValidationIsDiscarded()
+        testPresetClearsUnsavedKeyWithEmptySavedKey()
+        testEndpointEditsAndResetDiscardValidation()
+    }
+
+    private static func testPresetClearsUnsavedKeyWithEmptySavedKey() {
+        let before = snapshot(key: "", transcriptionKey: "synthetic-asr-key")
+        let applied = ProviderPreset.applyingAtlasCloud(to: before, apiKeyDraft: "synthetic-unsaved-old-key")
+        TestSupport.expectEqual(applied.settings.apiBaseURL, ProviderPreset.atlasCloudAPIBaseURL)
+        TestSupport.expectEqual(applied.settings.apiKey, before.apiKey)
+        TestSupport.expectEqual(applied.apiKeyDraft, "")
+        TestSupport.expectEqual(applied.settings.effectiveTranscriptionAPIKey, "synthetic-asr-key")
+
+        let blocked = ProviderPreset.applyingAtlasCloud(to: snapshot(key: ""), apiKeyDraft: "synthetic-draft")
+        TestSupport.expectEqual(blocked.apiKeyDraft, "synthetic-draft")
+        let alreadySelected = ProviderPreset.applyingAtlasCloud(to: applied.settings, apiKeyDraft: "synthetic-atlas-draft")
+        TestSupport.expectEqual(alreadySelected.apiKeyDraft, "synthetic-atlas-draft")
+    }
+
+    private static func testEndpointEditsAndResetDiscardValidation() {
+        let gate = KeyValidationGate()
+        var savedKey = ""
+        let unchanged = gate.begin()
+        gate.invalidateIfEndpointChanged(from: groqURL, to: groqURL)
+        TestSupport.expect(gate.applyIfCurrent(unchanged) { savedKey = "synthetic-current-key" }, "Losing focus without changing the endpoint keeps validation current")
+
+        for (previous, next) in [(groqURL, ProviderPreset.atlasCloudAPIBaseURL), (ProviderPreset.atlasCloudAPIBaseURL, groqURL)] {
+            let pending = gate.begin()
+            gate.invalidateIfEndpointChanged(from: previous, to: next)
+            TestSupport.expect(!gate.applyIfCurrent(pending) { savedKey = "synthetic-stale-key" }, "Editing or resetting the endpoint discards a pending validation")
+            TestSupport.expectEqual(savedKey, "synthetic-current-key")
+        }
     }
 
     private static let groqURL = "https://api.groq.com/openai/v1"

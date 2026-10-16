@@ -7,6 +7,7 @@ import ServiceManagement
 private struct SetupProviderSettingsSheet: View {
     @Environment(\.dismiss) private var dismiss
     @Binding var apiBaseURLInput: String
+    @Binding var apiKeyInput: String
     @Binding var transcriptionAPIURLInput: String
     @Binding var transcriptionAPIKeyInput: String
 
@@ -28,6 +29,7 @@ private struct SetupProviderSettingsSheet: View {
             ScrollView {
                 ProviderSettingsFields(
                     apiBaseURLInput: $apiBaseURLInput,
+                    apiKeyInput: $apiKeyInput,
                     transcriptionAPIURLInput: $transcriptionAPIURLInput,
                     transcriptionAPIKeyInput: $transcriptionAPIKeyInput,
                     showsModelDescription: true
@@ -217,6 +219,7 @@ struct SetupView: View {
         .sheet(isPresented: $showingProviderSettingsSheet) {
             SetupProviderSettingsSheet(
                 apiBaseURLInput: $apiBaseURLInput,
+                apiKeyInput: $apiKeyInput,
                 transcriptionAPIURLInput: $transcriptionAPIURLInput,
                 transcriptionAPIKeyInput: $transcriptionAPIKeyInput
             )

@@ -41,6 +41,7 @@ private let iso8601DayFormatter: DateFormatter = {
 struct ProviderSettingsFields: View {
     @EnvironmentObject var appState: AppState
     @Binding var apiBaseURLInput: String
+    @Binding var apiKeyInput: String
     @Binding var transcriptionAPIURLInput: String
     @Binding var transcriptionAPIKeyInput: String
     @State private var atlasPresetBlockedMessage: String?
@@ -68,6 +69,7 @@ struct ProviderSettingsFields: View {
         let trimmed = apiBaseURLInput.trimmingCharacters(in: .whitespacesAndNewlines)
         let resolvedBaseURL = trimmed.isEmpty ? AppState.defaultAPIBaseURL : trimmed
         apiBaseURLInput = resolvedBaseURL
+        appState.keyValidationGate.invalidateIfEndpointChanged(from: appState.apiBaseURL, to: resolvedBaseURL)
         appState.apiBaseURL = resolvedBaseURL
     }
 
@@ -166,7 +168,11 @@ struct ProviderSettingsFields: View {
             return
         }
         atlasPresetBlockedMessage = nil
-        let next = ProviderPreset.applyingAtlasCloud(to: current)
+        let application = ProviderPreset.applyingAtlasCloud(to: current, apiKeyDraft: apiKeyInput)
+        let next = application.settings
+        // Clear an unsaved previous-provider key even when the saved key was
+        // already empty and its onChange observer would not fire.
+        apiKeyInput = application.apiKeyDraft
 
         // A key validation that is still running was started for the previous
         // provider; its result must not be saved under the new endpoint.
@@ -215,7 +221,7 @@ struct ProviderSettingsFields: View {
 
                 Button("Reset to Default") {
                     apiBaseURLInput = AppState.defaultAPIBaseURL
-                    appState.apiBaseURL = AppState.defaultAPIBaseURL
+                    commitAPIBaseURL()
                 }
                 .font(.caption)
             }
@@ -1073,6 +1079,7 @@ struct GeneralSettingsView: View {
                     Divider()
                     ProviderSettingsFields(
                         apiBaseURLInput: $apiBaseURLInput,
+                        apiKeyInput: $apiKeyInput,
                         transcriptionAPIURLInput: $transcriptionAPIURLInput,
                         transcriptionAPIKeyInput: $transcriptionAPIKeyInput,
                         showsModelDescription: false
